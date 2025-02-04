@@ -176,7 +176,7 @@ class Project():
         return self.yaml
 
     def get_hugo_row(self):
-        return f'| {self.index} | [{self.yaml["documentation"]["title"]}]({self.index :03}) | {self.yaml["documentation"]["author"]}|\n'
+        return f'| {self.mux_address} | [{self.yaml["documentation"]["title"]}]({self.mux_address :03}) | {self.yaml["documentation"]["author"]}|\n'
 
     # docs stuff for index on README.md
     def get_index_row(self):
@@ -229,6 +229,12 @@ class Project():
         repo = git.Repo(os.path.join(self.local_dir, "tt"))
         return f"{repo.active_branch.name} {repo.commit().hexsha[:8]}"
     
+    def get_workflow_url_when_submitted(self):
+        json_file = os.path.join(self.local_dir, 'commit_id.json')
+        with open(json_file) as fh:
+            commit_info = json.load(fh)
+        return commit_info['workflow_url']
+
     def get_workflow_url(self):
         GITHUB_SERVER_URL = os.getenv('GITHUB_SERVER_URL')
         GITHUB_REPOSITORY = os.getenv('GITHUB_REPOSITORY')
@@ -242,10 +248,7 @@ class Project():
             return f"[{self.index:03} : {self.email} : {self.git_url}]"
         else:
         """
-        return f"[{self.index:03} : {self.git_url}]"
-
-    def get_latest_action_url(self):
-        return git_utils.get_latest_action_url(self.git_url, self.local_dir)
+        return f"[{self.mux_address:03} : {self.git_url}]"
 
     def get_macro_name(self):
         return self.top_module
@@ -261,7 +264,10 @@ class Project():
     # metrics
     def get_metrics_path(self):
         if self.is_user_project:
-            return os.path.join(self.local_dir, 'runs/wokwi/reports/metrics.csv')
+            if self.args.openlane2:
+                return os.path.join(self.local_dir, 'runs/wokwi/final/metrics.csv')
+            else:
+                return os.path.join(self.local_dir, 'runs/wokwi/reports/metrics.csv')
         else:
             return os.path.join(self.local_dir, 'metrics.csv')
 
@@ -378,7 +384,7 @@ class Project():
         if not picture:
             return
         extension = os.path.splitext(picture)[1]
-        supported_extensions = ['.png', '.jpg', '.jpeg', '.svg']
+        supported_extensions = ['.png', '.jpg', '.jpeg', '.svg', '.pdf']
         if not os.path.exists(picture):
             logging.warning(f"Picture file '{picture}' not found in repo, skipping")
         elif extension not in supported_extensions:
@@ -397,17 +403,26 @@ class Project():
         tt_version = self.get_tt_tools_version()
         workflow_url = self.get_workflow_url()
       
-        # requires PDK, PDK_ROOT, OPENLANE_ROOT & OPENLANE_IMAGE_NAME to be set in local environment
-        harden_cmd = 'docker run --rm -v $OPENLANE_ROOT:/openlane -v $PDK_ROOT:$PDK_ROOT -v $(pwd):/work -e PDK=$PDK -e PDK_ROOT=$PDK_ROOT -u $(id -u $USER):$(id -g $USER) $OPENLANE_IMAGE_NAME /bin/bash -c "./flow.tcl -overwrite -design /work/src -run_path /work/runs -tag wokwi"'
-        logging.debug(harden_cmd)
-        env = os.environ.copy()
-        p = subprocess.run(harden_cmd, shell=True, env=env)
-        if p.returncode != 0:
-            logging.error("harden failed")
-            exit(1)
+        if self.args.openlane2:
+            if not os.path.exists('runs/wokwi'):
+                print("OpenLane 2 harden not supported yet, please run OpenLane 2 manually")
+                exit(1)
+            print("Writing commit information on top of the existing OpenLane 2 run (runs/wokwi)")
+        else:
+            # requires PDK, PDK_ROOT, OPENLANE_ROOT & OPENLANE_IMAGE_NAME to be set in local environment
+            harden_cmd = 'docker run --rm -v $OPENLANE_ROOT:/openlane -v $PDK_ROOT:$PDK_ROOT -v $(pwd):/work -e PDK=$PDK -e PDK_ROOT=$PDK_ROOT -u $(id -u $USER):$(id -g $USER) $OPENLANE_IMAGE_NAME /bin/bash -c "./flow.tcl -overwrite -design /work/src -run_path /work/runs -tag wokwi"'
+            logging.debug(harden_cmd)
+            env = os.environ.copy()
+            p = subprocess.run(harden_cmd, shell=True, env=env)
+            if p.returncode != 0:
+                logging.error("harden failed")
+                exit(1)
         
         # Write commit information
-        with open(os.path.join(self.local_dir, 'runs/wokwi/results/final/commit_id.json'), 'w') as f:
+        commit_id_json_path = 'runs/wokwi/results/final/commit_id.json'
+        if self.args.openlane2:
+            commit_id_json_path = 'runs/wokwi/final/commit_id.json'
+        with open(os.path.join(self.local_dir, commit_id_json_path), 'w') as f:
             json.dump({
                 "app": f"Tiny Tapeout {tt_version}",
                 "repo": repo,
@@ -450,12 +465,8 @@ class Project():
             # handle pictures
             yaml['picture_link'] = ''
             if yaml['picture']:
-                # skip SVG for now, not supported by pandoc
                 picture_name = yaml['picture']
-                if 'svg' not in picture_name:
-                    yaml['picture_link'] = '![picture]({})'.format(picture_name)
-                else:
-                    logging.warning("svg not supported")
+                yaml['picture_link'] = '![picture]({})'.format(picture_name)
 
             # now build the doc & print it
             try:
@@ -474,6 +485,8 @@ class Project():
     # SVG and PNG renders of the GDS
     def create_svg(self):
         gds = glob.glob(os.path.join(self.local_dir, 'runs/wokwi/results/final/gds/*gds'))
+        if self.args.openlane2:
+            gds = glob.glob(os.path.join(self.local_dir, 'runs/wokwi/final/gds/*gds'))
         library = gdstk.read_gds(gds[0])
         top_cells = library.top_level()
         top_cells[0].write_svg('gds_render.svg')
@@ -483,7 +496,10 @@ class Project():
 
     def print_warnings(self):
         warnings = []
-        with open(os.path.join(self.local_dir, 'runs/wokwi/logs/synthesis/1-synthesis.log')) as f:
+        synth_log = 'runs/wokwi/logs/synthesis/1-synthesis.log'
+        if self.args.openlane2:
+            synth_log = 'runs/wokwi/02-yosys-synthesis/yosys-synthesis.log'
+        with open(os.path.join(self.local_dir, synth_log)) as f:
             for line in f.readlines():
                 if line.startswith('Warning:'):
                     # bogus warning https://github.com/YosysHQ/yosys/commit/bfacaddca8a2e113e4bc3d6177612ccdba1555c8
@@ -573,6 +589,8 @@ class Project():
         cell_count = {}
         total = 0
         gl_files = glob.glob(os.path.join(self.local_dir, 'runs/wokwi/results/final/verilog/gl/*.nl.v'))
+        if self.args.openlane2:
+            gl_files = glob.glob(os.path.join(self.local_dir, 'runs/wokwi/final/nl/*.nl.v'))
         with open(gl_files[0]) as fh:
             for line in fh.readlines():
                 m = re.search(r'sky130_(\S+)__(\S+)_(\d+)', line)

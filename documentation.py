@@ -64,15 +64,18 @@ class Docs():
 
     def dump_markdown(self):
         doc_header = self.load_doc_template('doc_header.md')
+        doc_chip_map = self.load_doc_template('../../docs/chip_map.md')
         doc_template = self.load_doc_template('doc_template.md')
+        doc_pinout = self.load_doc_template('PINOUT.md')
         doc_info = self.load_doc_template("../../tt-multiplexer/docs/INFO.md")
-        doc_verification = self.load_doc_template('VERIFICATION.md')
-        doc_sta = self.load_doc_template('STA.md')
+        doc_errata = self.load_doc_template('ERRATA.md')
         doc_credits = self.load_doc_template('CREDITS.md')
 
         with open(self.args.dump_markdown, 'w') as fh:
             repo = git.Repo(".")
             fh.write(doc_header.format(name=self.config['name'], repo=get_first_remote(repo)))
+            fh.write(doc_chip_map)
+            fh.write("# Projects\n")
 
             self.projects.sort(key=lambda x: x.mux_address)
 
@@ -87,28 +90,40 @@ class Docs():
                 if yaml_data['picture']:
                     extension = os.path.splitext(yaml_data['picture'])[1]
                     picture_path = os.path.join(project.local_dir, f"picture{extension}")
-                    if extension == '.svg':
-                        # SVGs are not supported by pandoc
-                        logging.warning(f"Skipping unsupported SVG picture {picture_path}")
-                    elif os.path.exists(picture_path):
+                    if os.path.exists(picture_path):
                         yaml_data['picture_link'] = latex_centered_image(picture_path)
                     else:
                         logging.warning(f"picture {picture_path} not found, skipping")
 
+                # ensure there are no LaTeX escape sequences in various fields, and that optional fields are set
+                for key in ['author', 'description', 'how_it_works', 'how_to_test', 'external_hw', 'clock_hz', 'git_url', 'doc_link']:
+                    if key in yaml_data:
+                        yaml_data[key] = str(yaml_data[key]).replace("\\", "\mbox{\\textbackslash}")
+                    else:
+                        yaml_data[key] = ""
+
+                # many people remove unused pins in input / output / bidirectional
+                for key in ['inputs', 'outputs', 'bidirectional']:
+                    yaml_data[key].extend((8 - len(yaml_data[key])) * ['n/a'])
+
                 # now build the doc & print it
                 try:
-                    doc = doc_template.format(**yaml_data)
+                    doc = (doc_template
+                        .replace('__git_url__', '{git_url}')
+                        .replace('__doc_link__', '{doc_link}')
+                        .format(**yaml_data)
+                    )
                     fh.write(doc)
                     fh.write("\n\clearpage\n")
                 except IndexError:
                     logging.warning("missing pins in info.yaml, skipping")
 
             # ending
+            fh.write(doc_pinout)
+            fh.write("\n\clearpage\n")
             fh.write(doc_info)
             fh.write("\n\clearpage\n")
-            fh.write(doc_verification)
-            fh.write("\n\clearpage\n")
-            fh.write(doc_sta)
+            fh.write(doc_errata)
             fh.write("\n\clearpage\n")
             fh.write(doc_credits)
 
@@ -135,36 +150,52 @@ class Docs():
             index_template = fh.read()
 
         # copy image
-        shutil.copyfile('pics/tinytapeout_numbered.png', os.path.join(hugo_images, 'tinytapeout-03.png'))  # TODO fix hardcoded run
+        # TODO, need to get image from somewhere
+        shutil.copyfile('tt/docs/pics/tinytapeout_numbered.png', os.path.join(hugo_images, f'tinytapeout-{self.config["id"]}.png'))
 
         # index page
-        logging.info("building pages - can take a minute as fetching latest GDS action URLs for all projects")
+        logging.info("building pages")
         with open(os.path.join(hugo_root, '_index.md'), 'w') as fh:
             fh.write(index_template)
             fh.write('# All projects\n')
             fh.write("| Index | Title | Author |\n")
             fh.write("| ----- | ----- | -------|\n")
+            self.projects.sort(key=lambda x: x.mux_address)
             for project in self.projects:
                 logging.info(project)
                 fh.write(project.get_hugo_row())
 
-                project_dir = os.path.join(hugo_root, f'{project.get_index() :03}')
+                project_dir = os.path.join(hugo_root, f'{project.mux_address :03}')
                 project_image_dir = os.path.join(project_dir, 'images')
                 os.makedirs(project_dir)
                 os.makedirs(project_image_dir)
                 yaml_data = project.get_project_doc_yaml()
+                yaml_data['mux_address'] = project.mux_address
+                if '""' in yaml_data['title']:
+                    yaml_data['title'] = yaml_data['title'].replace('""', '')
+
                 yaml_data['index'] = project.index
                 yaml_data['weight'] = project.index + 1
-                yaml_data['git_action'] = project.get_latest_action_url()
+                yaml_data['git_action'] = project.get_workflow_url_when_submitted()
+                for key in 'external_hw', 'clock_hz':
+                    if key not in yaml_data:
+                        yaml_data[key] = ''
+
+                # many people remove unused pins in input / output / bidirectional
+                for key in ['inputs', 'outputs', 'bidirectional']:
+                    yaml_data[key].extend((8 - len(yaml_data[key])) * ['n/a'])
+
                 yaml_data['picture_link'] = ''
                 if yaml_data['picture']:
-                    picture_name = yaml_data['picture']
-                    picture_filename = os.path.join(project.local_dir, picture_name)
-                    picture_basename = os.path.basename(picture_filename)
+                    extension = os.path.splitext(yaml_data['picture'])[1]
+                    picture_path = os.path.join(project.local_dir, f"picture{extension}")
+                    picture_basename = os.path.basename(picture_path)
                     try:
-                        shutil.copyfile(picture_filename, os.path.join(project_image_dir, picture_basename))
+                        shutil.copyfile(picture_path, os.path.join(project_image_dir, picture_basename))
                         yaml_data['picture_link'] = f'![picture](images/{picture_basename})'
+                        logging.warning(f"picture found {picture_path}")
                     except FileNotFoundError:
+                        logging.warning(f"picture not found {picture_path}")
                         yaml_data['picture_link'] = 'Image path is broken'
                 doc = doc_template.format(**yaml_data)
                 with open(os.path.join(project_dir, '_index.md'), 'w') as pfh:
